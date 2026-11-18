@@ -38,7 +38,9 @@ Env opsional: `CLAUDIA_PROVIDER`, `CLAUDIA_MODEL`, `CLAUDIA_NAME`, `CLAUDIA_SYST
 File di perangkat: `/files` atau Ctrl+F membuka browser file, `/attach <path>` melampirkan
 langsung, dan menulis `@path` di pesan melampirkan file/folder itu. Hanya teks
 (maks 100 KB per file, 300 KB per pesan). Model mendapat tool baca (read-only) hanya
-saat diminta; atur lewat `/akses auto|on|off`.
+saat diminta; atur lewat `/akses auto|on|off`. Beberapa `tool_call` dari model dijalankan
+**sekaligus** (satu thread per panggilan), lalu hasilnya disusun kembali sesuai urutan
+`tool_call_id` sebelum dikirim ke provider.
 
 ## Susunan modul
 

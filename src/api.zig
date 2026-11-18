@@ -315,18 +315,7 @@ fn streamChat(t: *const Target, history: []const Hist) !void {
         try assistant.append(a, "]}");
         try messages.append(a, try assistant.dupe(a));
 
-        for (ctx.calls.items) |call| {
-            const args = parseArgs(call.args);
-            event.push(.{ .tool = tools.label(std.heap.c_allocator, call.name, args) });
-            const result = tools.run(std.heap.c_allocator, call.name, args);
-            var msg = util.Str.init();
-            try msg.append(a, "{\"role\":\"tool\",\"tool_call_id\":");
-            try appendJsonString(&msg, a, call.id);
-            try msg.append(a, ",\"content\":");
-            try appendJsonString(&msg, a, result);
-            try msg.appendByte(a, '}');
-            try messages.append(a, try msg.dupe(a));
-        }
+        try runToolCalls(a, ctx.calls.items, &messages);
     }
     event.push(.{ .chunk = "\n\n(berhenti: terlalu banyak langkah baca file)" });
 }
@@ -450,6 +439,65 @@ fn parseArgs(raw: []const u8) tools.Args {
         if (v == .bool) out.show_hidden = v.bool;
     }
     return out;
+}
+
+// ── tool paralel ─────────────────────────────────────────
+
+const ToolRunner = *const fn (name: []const u8, args: tools.Args) []const u8;
+
+const ToolSlot = struct {
+    name: []const u8,
+    args: tools.Args,
+    result: []const u8 = "Error: alat gagal",
+};
+
+fn toolThread(slot: *ToolSlot, runner: ToolRunner) void {
+    slot.result = runner(slot.name, slot.args);
+}
+
+/// Jalankan semua panggilan alat sekaligus: satu thread per panggilan, tanpa antrean.
+/// Hasil tetap disusun sesuai urutan `tool_call_id` supaya riwayat API valid.
+fn runToolCallsWith(
+    comptime runner: ToolRunner,
+    a: std.mem.Allocator,
+    calls: []const ToolCall,
+    out: *util.List([]const u8),
+) !void {
+    if (calls.len == 0) return;
+    const slots = try a.alloc(ToolSlot, calls.len);
+    defer a.free(slots);
+    const threads = try a.alloc(?std.Thread, calls.len);
+    defer a.free(threads);
+    for (threads) |*th| th.* = null;
+
+    for (calls, 0..) |call, i| {
+        const args = parseArgs(call.args);
+        event.push(.{ .tool = tools.label(std.heap.c_allocator, call.name, args) });
+        slots[i] = .{ .name = call.name, .args = args };
+        threads[i] = std.Thread.spawn(.{}, toolThread, .{ &slots[i], runner }) catch null;
+    }
+    // Kalau spawn gagal, jalankan di thread ini agar hasilnya tetap ada.
+    for (threads, 0..) |th, i| {
+        if (th) |handle| handle.join() else toolThread(&slots[i], runner);
+    }
+    for (calls, 0..) |call, i| {
+        var msg = util.Str.init();
+        defer msg.deinit(a);
+        try msg.append(a, "{\"role\":\"tool\",\"tool_call_id\":");
+        try appendJsonString(&msg, a, call.id);
+        try msg.append(a, ",\"content\":");
+        try appendJsonString(&msg, a, slots[i].result);
+        try msg.appendByte(a, '}');
+        try out.append(a, try msg.dupe(a));
+    }
+}
+
+fn realToolRunner(name: []const u8, args: tools.Args) []const u8 {
+    return tools.run(std.heap.c_allocator, name, args);
+}
+
+fn runToolCalls(a: std.mem.Allocator, calls: []const ToolCall, out: *util.List([]const u8)) !void {
+    return runToolCallsWith(realToolRunner, a, calls, out);
 }
 
 // ── daftar model ─────────────────────────────────────────
@@ -733,4 +781,47 @@ fn jsonQuoted(a: std.mem.Allocator, s: []const u8) ![]const u8 {
     var out = util.Str.init();
     try appendJsonString(&out, a, s);
     return out.dupe(a);
+}
+
+test "tool calls run together and keep their order" {
+    fsx.init(std.heap.c_allocator);
+    const a = std.testing.allocator;
+    const slow = struct {
+        fn run(name: []const u8, args: tools.Args) []const u8 {
+            _ = name;
+            const start = std.Io.Clock.now(.awake, fsx.io).nanoseconds;
+            while (std.Io.Clock.now(.awake, fsx.io).nanoseconds - start < 200 * std.time.ns_per_ms) {
+                std.Thread.yield() catch {};
+            }
+            return std.fmt.allocPrint(std.heap.c_allocator, "<{s}>", .{args.path}) catch "?";
+        }
+    }.run;
+
+    const calls = [_]ToolCall{
+        .{ .id = "a", .name = "read_file", .args = "{\"path\":\"a\"}" },
+        .{ .id = "b", .name = "read_file", .args = "{\"path\":\"b\"}" },
+        .{ .id = "c", .name = "read_file", .args = "{\"path\":\"c\"}" },
+        .{ .id = "d", .name = "read_file", .args = "{\"path\":\"d\"}" },
+    };
+    var out = util.List([]const u8).init();
+    defer {
+        for (out.items) |s| a.free(s);
+        out.deinit(a);
+    }
+
+    const t0 = std.Io.Clock.now(.awake, fsx.io).nanoseconds;
+    try runToolCallsWith(slow, a, &calls, &out);
+    const elapsed = std.Io.Clock.now(.awake, fsx.io).nanoseconds - t0;
+    // Berurutan butuh ~800 ms; kalau paralel ~200 ms.
+    try std.testing.expect(elapsed < 600 * std.time.ns_per_ms);
+
+    try std.testing.expectEqual(@as(usize, calls.len), out.len());
+    for (out.items, 0..) |msg, i| {
+        const needle = try std.fmt.allocPrint(a, "\"tool_call_id\":\"{c}\"", .{@as(u8, @intCast('a' + i))});
+        defer a.free(needle);
+        try std.testing.expect(std.mem.indexOf(u8, msg, needle) != null);
+        const content = try std.fmt.allocPrint(a, "\"content\":\"<{c}>\"", .{@as(u8, @intCast('a' + i))});
+        defer a.free(content);
+        try std.testing.expect(std.mem.indexOf(u8, msg, content) != null);
+    }
 }
