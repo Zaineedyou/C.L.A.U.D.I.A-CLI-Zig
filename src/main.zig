@@ -67,7 +67,6 @@ test {
     _ = @import("ui/theme.zig");
     _ = @import("ui/markdown.zig");
     _ = @import("term.zig");
-    _ = @import("logo.zig");
     _ = @import("app/commands.zig");
 }
 

@@ -1,4 +1,4 @@
-//! Logo layar awal: foto Claudia (assets/claudia.png) yang ditanam di dalam binary,
+//! Logo layar awal: gambar Claudia (assets/claudia.png) yang ditanam di dalam binary,
 //! di-decode saat start lalu diperkecil jadi sel setengah blok (▀) berwarna asli.
 
 const std = @import("std");

@@ -1,23 +1,38 @@
-//! Animasi yang digambar langsung ke sel: latar pastel, logo foto, kilau, kartu bulat.
-//! Port dari src/ui/anim.rs (bagian huruf ASCII diganti foto di logo.zig).
+//! Animasi yang digambar langsung ke sel: latar pastel, logo ASCII, kilau, kartu bulat.
+//! Port 1:1 dari src/ui/anim.rs.
 
 const std = @import("std");
 const theme = @import("theme.zig");
 const screen_mod = @import("screen.zig");
-const logo_mod = @import("../logo.zig");
 const width = @import("../width.zig");
 
 const Screen = screen_mod.Screen;
 const Rect = screen_mod.Rect;
 const Color = theme.Color;
 
+/// Huruf CLAUDIA besar: tinggi 5 baris, lebar 6 kolom, sudut dibulatkan pakai setengah blok.
+const LETTERS = [7][5][]const u8{
+    .{ "▄████▄", "██    ", "██    ", "██    ", "▀████▀" }, // C
+    .{ "██    ", "██    ", "██    ", "██    ", "██████" }, // L
+    .{ "▄████▄", "██  ██", "██████", "██  ██", "██  ██" }, // A
+    .{ "██  ██", "██  ██", "██  ██", "██  ██", "▀████▀" }, // U
+    .{ "█████▄", "██  ██", "██  ██", "██  ██", "█████▀" }, // D
+    .{ "██████", "  ██  ", "  ██  ", "  ██  ", "██████" }, // I
+    .{ "▄████▄", "██  ██", "██████", "██  ██", "██  ██" }, // A
+};
+
+/// 7 huruf x 6 kolom + 6 spasi.
+pub const LOGO_W: u16 = 48;
+/// 5 baris huruf + 1 baris cadangan untuk gelombang.
+pub const LOGO_H: u16 = 6;
+
 /// Tinggi area logo di layar awal (baris sel).
-pub fn logoHeight(a: std.mem.Allocator) u16 {
-    return logo_mod.logoHeight(a);
+pub fn logoHeight(_: std.mem.Allocator) u16 {
+    return LOGO_H;
 }
 
 pub fn logoWidth() u16 {
-    return logo_mod.LOGO_W;
+    return LOGO_W;
 }
 
 /// Latar gradien pastel (pink, peach, lilac, biru langit, mint) yang bergeser pelan.
@@ -36,20 +51,21 @@ pub fn backdrop(s: *Screen, tick: usize) void {
     }
 }
 
-/// Foto Claudia: digambar sebagai sel setengah blok; `alpha` memudarkannya saat layar bergeser.
-pub fn logo(s: *Screen, a: std.mem.Allocator, x: u16, y: u16, alpha: f32) void {
-    const g = logo_mod.get(a);
-    if (g.w == 0) return;
-    var row: u16 = 0;
-    while (row < g.h) : (row += 1) {
-        var col: u16 = 0;
-        while (col < g.w) : (col += 1) {
-            const c = g.cellAt(col, row) orelse continue;
-            // Warna yang tembus pandang dicampur ke latar di belakangnya (gradien pastel).
-            const base = s.bgAt(x + col, y + row);
-            const top = theme.mix(base, theme.mix(theme.BG, c.top, alpha), @as(f32, @floatFromInt(c.top_a)) / 255.0);
-            const bottom = if (c.bottom_a < 8) base else theme.mix(base, c.bottom, @as(f32, @floatFromInt(c.bottom_a)) / 255.0);
-            s.putStyled(x + col, y + row, "▀", top, bottom, false);
+/// Logo besar: tiap huruf naik-turun satu baris mengikuti gelombang, dan warnanya pelangi yang mengalir.
+pub fn logo(s: *Screen, x: u16, y: u16, tick: usize, alpha: f32) void {
+    const t: f32 = @as(f32, @floatFromInt(tick)) * 0.08;
+    for (LETTERS, 0..) |glyph, i| {
+        const wave = @sin(t - @as(f32, @floatFromInt(i)) * 0.9);
+        const drop: u16 = @intFromFloat(@round((wave + 1.0) / 2.0));
+        for (glyph, 0..) |row, r| {
+            var it = Utf8Iter{ .s = row };
+            var c: usize = 0;
+            while (it.next()) |cp| : (c += 1) {
+                if (cp == ' ') continue;
+                const col: u16 = @intCast(i * 7 + c);
+                const color = theme.flow(@as(f32, @floatFromInt(col)) / @as(f32, @floatFromInt(LOGO_W)), tick * 2);
+                s.putCp(x + col, y + @as(u16, @intCast(r)) + drop, cp, theme.mix(theme.BG, color, alpha), s.bgAt(x + col, y + @as(u16, @intCast(r)) + drop), false);
+            }
         }
     }
 }
